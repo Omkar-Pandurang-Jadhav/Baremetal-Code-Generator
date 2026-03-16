@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pydantic
 import pytest
 
 from parser import (
@@ -199,13 +200,13 @@ class TestValidation:
             parse("Configure PF5 as GPIO output push-pull")
 
     def test_invalid_pin_number(self):
-        with pytest.raises(Exception):
-            # Pin 20 is out of range 0–15 — caught by Pydantic or validator
+        with pytest.raises(pydantic.ValidationError):
+            # Pin 20 is out of range 0–15 — caught by Pydantic model constraint
             parse("Configure PA20 as GPIO output")
 
     def test_invalid_speed(self):
-        with pytest.raises(Exception):
-            # 25 MHz is not a valid speed
+        with pytest.raises(pydantic.ValidationError):
+            # 25 MHz is not a valid speed — caught by Pydantic Literal constraint
             parse("Configure PA5 as GPIO output push-pull at 25 MHz")
 
     def test_invalid_usart_pin_mapping(self):
