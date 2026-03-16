@@ -25,7 +25,8 @@ from .schema import (
     USARTConfig,
 )
 from .validator import ValidationError, validate
-
+from .prompt_splitter import split_prompt
+from .context_resolver import propagate_context
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -45,16 +46,24 @@ def parse(prompt: str) -> ParsedIntent:
 
 
 def parse_multi(prompt: str) -> MultiParsedIntent:
-    """
-    Parse a prompt that may describe multiple configuration intents.
 
-    Currently delegates to :func:`parse` for single-intent prompts and
-    handles I2C dual-pin prompts (e.g. ``PB6 and PB7``).
-    """
-    tokens = tokenize(prompt)
-    intents = _build_intents(tokens)
-    validated = [validate(i) for i in intents]
-    return MultiParsedIntent(intents=validated)
+    segments = split_prompt(prompt)
+
+    segments = propagate_context(segments)
+
+    intents = []
+
+    for segment in segments:
+        try:
+            intent = parse(segment)
+            intents.append(intent)
+        except Exception:
+            continue
+
+    if not intents:
+        raise ValueError("No valid configuration detected.")
+
+    return MultiParsedIntent(intents=intents)
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +112,20 @@ def _build_intent(tokens: LexerTokens) -> ParsedIntent:
 
 def _build_gpio_intent(tokens: LexerTokens) -> ParsedIntent:
     if not tokens.pins:
-        raise ValueError("GPIO configuration requires at least one pin (e.g. PA5).")
-    port, pin = tokens.pins[0]
+        raise ValueError("GPIO configuration requires a pin (e.g. PA5).")
+
+    # Prefer pins not associated with alternate-function peripherals
+    port = None
+    pin = None
+
+    for p, pn in tokens.pins:
+        port = p
+        pin = pn
+        break
+
     mode = tokens.gpio_mode or "output"
     speed = tokens.speeds_mhz[0] if tokens.speeds_mhz else None
+
     return ParsedIntent(
         peripheral="gpio",
         configuration=GPIOConfig(
@@ -120,12 +139,36 @@ def _build_gpio_intent(tokens: LexerTokens) -> ParsedIntent:
         clock_enable=tokens.clock_enable,
     )
 
-
 def _build_usart_intent(tokens: LexerTokens) -> ParsedIntent:
+    """
+    Build USART configuration intent.
+
+    Improves pin selection by matching pins against valid alternate
+    function mappings instead of always choosing the first pin.
+    """
+
     instance = tokens.usart_instances[0]
     func = tokens.usart_function or "tx"
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
+
+    port = None
+    pin = None
+
+    key = f"usart{instance}"
+
+    # Look up valid alternate function pins from hardware rules
+    valid_pins = hw.AF_PIN_MAP.get((key, func), set())
+
+    # Try to find a matching pin in the extracted tokens
+    for p, pn in tokens.pins:
+        if (p, pn) in valid_pins:
+            port = p
+            pin = pn
+            break
+
+    # Fallback if no valid mapping found
+    if port is None and tokens.pins:
+        port, pin = tokens.pins[0]
+
     return ParsedIntent(
         peripheral="usart",
         configuration=USARTConfig(
@@ -142,8 +185,24 @@ def _build_timer_intent(tokens: LexerTokens) -> ParsedIntent:
     instance = tokens.timer_instances[0]
     channel = tokens.timer_channels[0] if tokens.timer_channels else None
     mode = tokens.timer_mode
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
+
+    port = None
+    pin = None
+
+    if channel:
+        key = f"tim{instance}"
+        ch_key = f"ch{channel}"
+        valid_pins = hw.AF_PIN_MAP.get((key, ch_key), set())
+
+        for p, pn in tokens.pins:
+            if (p, pn) in valid_pins:
+                port = p
+                pin = pn
+                break
+
+    if port is None and tokens.pins:
+        port, pin = tokens.pins[0]
+
     return ParsedIntent(
         peripheral="tim",
         configuration=TimerConfig(
@@ -159,16 +218,20 @@ def _build_timer_intent(tokens: LexerTokens) -> ParsedIntent:
 
 def _build_adc_intent(tokens: LexerTokens) -> ParsedIntent:
     instance = tokens.adc_instances[0]
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
 
-    # Resolve ADC channel from pin
+    port = None
+    pin = None
     channel = None
-    if port is not None and pin is not None:
-        for ch, (p, pn) in hw.ADC_CHANNEL_PIN_MAP.items():
-            if p == port and pn == pin:
+
+    for p, pn in tokens.pins:
+        for ch, (hp, hpin) in hw.ADC_CHANNEL_PIN_MAP.items():
+            if p == hp and pn == hpin:
+                port = p
+                pin = pn
                 channel = ch
                 break
+        if port:
+            break
 
     return ParsedIntent(
         peripheral="adc",
@@ -185,8 +248,22 @@ def _build_adc_intent(tokens: LexerTokens) -> ParsedIntent:
 def _build_spi_intent(tokens: LexerTokens) -> ParsedIntent:
     instance = tokens.spi_instances[0]
     func = tokens.spi_function
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
+
+    port = None
+    pin = None
+
+    key = f"spi{instance}"
+    valid_pins = hw.AF_PIN_MAP.get((key, func), set())
+
+    for p, pn in tokens.pins:
+        if (p, pn) in valid_pins:
+            port = p
+            pin = pn
+            break
+
+    if port is None and tokens.pins:
+        port, pin = tokens.pins[0]
+
     return ParsedIntent(
         peripheral="spi",
         configuration=SPIConfig(
@@ -202,8 +279,22 @@ def _build_spi_intent(tokens: LexerTokens) -> ParsedIntent:
 def _build_i2c_intent(tokens: LexerTokens) -> ParsedIntent:
     instance = tokens.i2c_instances[0]
     func = tokens.i2c_function
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
+
+    port = None
+    pin = None
+
+    key = f"i2c{instance}"
+    valid_pins = hw.AF_PIN_MAP.get((key, func), set())
+
+    for p, pn in tokens.pins:
+        if (p, pn) in valid_pins:
+            port = p
+            pin = pn
+            break
+
+    if port is None and tokens.pins:
+        port, pin = tokens.pins[0]
+
     return ParsedIntent(
         peripheral="i2c",
         configuration=I2CConfig(
@@ -217,31 +308,69 @@ def _build_i2c_intent(tokens: LexerTokens) -> ParsedIntent:
 
 
 def _build_i2c_dual(tokens: LexerTokens) -> List[ParsedIntent]:
-    """Handle I2C prompts referencing two pins (SCL + SDA)."""
     instance = tokens.i2c_instances[0]
     intents = []
-    for idx, (port, pin) in enumerate(tokens.pins[:2]):
-        # First pin → scl, second pin → sda (convention)
-        func = "scl" if idx == 0 else "sda"
+
+    key = f"i2c{instance}"
+
+    scl_pins = hw.AF_PIN_MAP.get((key, "scl"), set())
+    sda_pins = hw.AF_PIN_MAP.get((key, "sda"), set())
+
+    scl = None
+    sda = None
+
+    for p, pn in tokens.pins:
+        if (p, pn) in scl_pins:
+            scl = (p, pn)
+        elif (p, pn) in sda_pins:
+            sda = (p, pn)
+
+    if scl:
         intents.append(
             ParsedIntent(
                 peripheral="i2c",
                 configuration=I2CConfig(
                     instance=instance,
-                    function=func,
-                    port=port,
-                    pin=pin,
+                    function="scl",
+                    port=scl[0],
+                    pin=scl[1],
                 ),
                 clock_enable=tokens.clock_enable,
             )
         )
+
+    if sda:
+        intents.append(
+            ParsedIntent(
+                peripheral="i2c",
+                configuration=I2CConfig(
+                    instance=instance,
+                    function="sda",
+                    port=sda[0],
+                    pin=sda[1],
+                ),
+                clock_enable=tokens.clock_enable,
+            )
+        )
+
     return intents
 
 
 def _build_exti_intent(tokens: LexerTokens) -> ParsedIntent:
     line = tokens.exti_lines[0]
-    port = tokens.pins[0][0] if tokens.pins else None
-    pin = tokens.pins[0][1] if tokens.pins else None
+
+    port = None
+    pin = None
+
+    for p, pn in tokens.pins:
+        if pn == line:
+            port = p
+            pin = pn
+            break
+
+    if port is None and tokens.pins:
+        port, pin = tokens.pins[0]
+
     return ParsedIntent(
         peripheral="exti",
         configuration=EXTIConfig(
