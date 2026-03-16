@@ -100,11 +100,13 @@ def _inject_peripheral_context(text: str, peripheral: str) -> str:
     # Find all function matches
     result = text
     offset = 0
+    # Allow a small buffer beyond the peripheral name length for whitespace/punctuation
+    LOOKBACK_BUFFER = 5
 
     for match in func_pattern.finditer(text):
         pos = match.start()
-        # Check if peripheral name appears within 20 chars before this function
-        lookback_start = max(0, pos - len(peripheral) - 5)
+        # Check if peripheral name appears shortly before this function
+        lookback_start = max(0, pos - len(peripheral) - LOOKBACK_BUFFER)
         lookback_text = text[lookback_start:pos]
 
         if not peripheral_pattern.search(lookback_text):

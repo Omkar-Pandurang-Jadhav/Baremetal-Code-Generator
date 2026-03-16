@@ -166,24 +166,9 @@ def _should_split_here(after_text: str, before_text: str) -> bool:
     if FUNC_PATTERN.match(after_stripped):
         return False
 
-    # If followed by a pin directly with context suggesting a new peripheral → split
+    # If followed by a pin directly → don't split (keep pin lists together)
     # e.g., "PA5, PA6" in a pin list should NOT split (handled by parser)
-    pin_match = PIN_PATTERN.match(after_stripped)
-    if pin_match:
-        # Check if previous text has a peripheral function context
-        # If before_text mentions a function like TX, then a bare pin is a new context
-        # If before_text is a pin list (GPIO context), don't split
-        if _is_pin_list_context(before_text, after_stripped):
-            return False
-        return False  # Default: keep pins together
+    if PIN_PATTERN.match(after_stripped):
+        return False
 
     return False
-
-
-def _is_pin_list_context(before_text: str, after_text: str) -> bool:
-    """Check if we're in a pin list context like 'PA5, PA6, and PA7'."""
-    # If the text before has GPIO or pin-list characteristics
-    pins_before = PIN_PATTERN.findall(before_text)
-    return len(pins_before) >= 1 and not PERIPHERAL_PATTERN.search(
-        before_text.split(",")[-1] if "," in before_text else before_text
-    )

@@ -7,18 +7,18 @@ This module handles Problem 4: Natural Language Action Mapping.
 
 Examples:
     "Blink LED on PA5"          → "configure GPIO output on PA5"
-    "Read ADC value from PA0"   → "configure ADC input on PA0"
+    "Read ADC value from PA0"   → "configure ADC1 on PA0"
     "Send data through USART1"  → "configure USART1 TX"
 """
 
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 # Mapping of natural language action patterns to configuration intents.
 # Each entry: (regex pattern, replacement template)
 # The replacement uses {rest} as a placeholder for the remaining text.
-ACTION_MAPPINGS: List[Tuple[re.Pattern, str]] = [
+ACTION_MAPPINGS: List[Tuple[re.Pattern, Optional[str]]] = [
     # LED / blink actions → GPIO output
     (
         re.compile(r'\bblink\s+(?:an?\s+)?LED\b', re.IGNORECASE),
