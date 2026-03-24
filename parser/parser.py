@@ -1,10 +1,4 @@
-"""
-Syntax parsing layer for the STM32 prompt parser.
 
-Converts :class:`~parser.lexer.LexerTokens` into validated
-:class:`~parser.schema.ParsedIntent` objects by applying peripheral-
-detection heuristics and assembling configuration models.
-"""
 
 from __future__ import annotations
 
@@ -28,35 +22,54 @@ from .validator import ValidationError, validate
 from .prompt_splitter import split_prompt
 from .context_resolver import propagate_context
 
+# ✅ NEW IMPORT (LLM NORMALIZER)
+from parser.normalizer import normalize_prompt
+import os
+print("📂 PARSER FILE:", os.path.abspath(__file__))
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def parse(prompt: str) -> ParsedIntent:
     """
-    Parse a natural-language *prompt* into a single :class:`ParsedIntent`.
-
-    Raises :class:`ValueError` if the prompt cannot be understood, or
-    :class:`~parser.validator.ValidationError` if the resulting
-    configuration violates hardware constraints.
+    Parse a natural-language prompt into a single ParsedIntent.
     """
+
+    # 🔥 STEP 1: Normalize using LLM
+    print("before")
+    prompt = normalize_prompt(prompt)
+    print("afdter")
+
     tokens = tokenize(prompt)
     intent = _build_intent(tokens)
     return validate(intent)
 
 
 def parse_multi(prompt: str) -> MultiParsedIntent:
+    """
+    Parse multi-command prompts into multiple intents.
+    """
+
+    # 🔥 STEP 1: Normalize using LLM
+    print("before")
+    prompt = normalize_prompt(prompt)
+    print("afdter")
+    print("afdter")
 
     segments = split_prompt(prompt)
-
     segments = propagate_context(segments)
 
     intents = []
 
     for segment in segments:
         try:
-            intent = parse(segment)
-            intents.append(intent)
+            tokens = tokenize(segment)
+            built_intents = _build_intents(tokens)
+
+            for intent in built_intents:
+                intents.append(validate(intent))
+
         except Exception:
             continue
 
@@ -71,8 +84,7 @@ def parse_multi(prompt: str) -> MultiParsedIntent:
 # ---------------------------------------------------------------------------
 
 def _build_intents(tokens: LexerTokens) -> List[ParsedIntent]:
-    """Build one or more intents from *tokens*."""
-    # I2C with two pins → produce two intents (scl + sda)
+    """Build one or more intents from tokens."""
     if tokens.i2c_instances and len(tokens.pins) == 2:
         return _build_i2c_dual(tokens)
 
@@ -80,10 +92,8 @@ def _build_intents(tokens: LexerTokens) -> List[ParsedIntent]:
 
 
 def _build_intent(tokens: LexerTokens) -> ParsedIntent:
-    """Build a single :class:`ParsedIntent` from extracted *tokens*."""
+    """Build a single ParsedIntent."""
 
-    # Peripheral detection priority:
-    #   explicit peripheral instances → GPIO (if pins present)
     if tokens.usart_instances:
         return _build_usart_intent(tokens)
     if tokens.timer_instances:
@@ -91,7 +101,7 @@ def _build_intent(tokens: LexerTokens) -> ParsedIntent:
     if tokens.adc_instances:
         return _build_adc_intent(tokens)
     if tokens.spi_instances:
-        return _build_spi_intent(tokens)
+        return _build_spi_intents(tokens)
     if tokens.i2c_instances:
         return _build_i2c_intent(tokens)
     if tokens.exti_lines:
@@ -99,29 +109,18 @@ def _build_intent(tokens: LexerTokens) -> ParsedIntent:
     if tokens.pins or tokens.gpio_ports:
         return _build_gpio_intent(tokens)
 
-    raise ValueError(
-        "Could not determine peripheral from prompt. "
-        "Please mention a peripheral (GPIO, USART, TIM, ADC, SPI, I2C, EXTI) "
-        "or a pin reference (e.g. PA5)."
-    )
+    raise ValueError("Could not determine peripheral from prompt.")
 
 
 # ---------------------------------------------------------------------------
-# Per-peripheral intent builders
+# Peripheral builders
 # ---------------------------------------------------------------------------
 
 def _build_gpio_intent(tokens: LexerTokens) -> ParsedIntent:
     if not tokens.pins:
-        raise ValueError("GPIO configuration requires a pin (e.g. PA5).")
+        raise ValueError("GPIO requires pin")
 
-    # Prefer pins not associated with alternate-function peripherals
-    port = None
-    pin = None
-
-    for p, pn in tokens.pins:
-        port = p
-        pin = pn
-        break
+    port, pin = tokens.pins[0]
 
     mode = tokens.gpio_mode or "output"
     speed = tokens.speeds_mhz[0] if tokens.speeds_mhz else None
@@ -139,14 +138,8 @@ def _build_gpio_intent(tokens: LexerTokens) -> ParsedIntent:
         clock_enable=tokens.clock_enable,
     )
 
+
 def _build_usart_intent(tokens: LexerTokens) -> ParsedIntent:
-    """
-    Build USART configuration intent.
-
-    Improves pin selection by matching pins against valid alternate
-    function mappings instead of always choosing the first pin.
-    """
-
     instance = tokens.usart_instances[0]
     func = tokens.usart_function or "tx"
 
@@ -154,18 +147,13 @@ def _build_usart_intent(tokens: LexerTokens) -> ParsedIntent:
     pin = None
 
     key = f"usart{instance}"
-
-    # Look up valid alternate function pins from hardware rules
     valid_pins = hw.AF_PIN_MAP.get((key, func), set())
 
-    # Try to find a matching pin in the extracted tokens
     for p, pn in tokens.pins:
         if (p, pn) in valid_pins:
-            port = p
-            pin = pn
+            port, pin = p, pn
             break
 
-    # Fallback if no valid mapping found
     if port is None and tokens.pins:
         port, pin = tokens.pins[0]
 
@@ -196,8 +184,7 @@ def _build_timer_intent(tokens: LexerTokens) -> ParsedIntent:
 
         for p, pn in tokens.pins:
             if (p, pn) in valid_pins:
-                port = p
-                pin = pn
+                port, pin = p, pn
                 break
 
     if port is None and tokens.pins:
@@ -226,9 +213,7 @@ def _build_adc_intent(tokens: LexerTokens) -> ParsedIntent:
     for p, pn in tokens.pins:
         for ch, (hp, hpin) in hw.ADC_CHANNEL_PIN_MAP.items():
             if p == hp and pn == hpin:
-                port = p
-                pin = pn
-                channel = ch
+                port, pin, channel = p, pn, ch
                 break
         if port:
             break
@@ -245,37 +230,59 @@ def _build_adc_intent(tokens: LexerTokens) -> ParsedIntent:
     )
 
 
-def _build_spi_intent(tokens: LexerTokens) -> ParsedIntent:
+def _build_spi_intents(tokens: LexerTokens) -> List[ParsedIntent]:
+    """
+    Build multiple SPI intents (MOSI, MISO, SCK, NSS).
+    """
+
     instance = tokens.spi_instances[0]
-    func = tokens.spi_function
-
-    port = None
-    pin = None
-
     key = f"spi{instance}"
-    valid_pins = hw.AF_PIN_MAP.get((key, func), set())
 
-    for p, pn in tokens.pins:
-        if (p, pn) in valid_pins:
-            port = p
-            pin = pn
-            break
+    intents = []
 
-    if port is None and tokens.pins:
-        port, pin = tokens.pins[0]
+    # All possible SPI functions
+    spi_functions = ["mosi", "miso", "sck", "nss"]
 
-    return ParsedIntent(
-        peripheral="spi",
-        configuration=SPIConfig(
-            instance=instance,
-            function=func,
-            port=port,
-            pin=pin,
-        ),
-        clock_enable=tokens.clock_enable,
-    )
+    # Track used pins
+    used_pins = set()
 
+    for func in spi_functions:
+        valid_pins = hw.AF_PIN_MAP.get((key, func), set())
 
+        for p, pn in tokens.pins:
+            if (p, pn) in valid_pins and (p, pn) not in used_pins:
+                intents.append(
+                    ParsedIntent(
+                        peripheral="spi",
+                        configuration=SPIConfig(
+                            instance=instance,
+                            function=func,
+                            port=p,
+                            pin=pn,
+                        ),
+                        clock_enable=tokens.clock_enable,
+                    )
+                )
+                used_pins.add((p, pn))
+                break
+
+    # Fallback (if nothing matched)
+    if not intents and tokens.pins:
+        p, pn = tokens.pins[0]
+        intents.append(
+            ParsedIntent(
+                peripheral="spi",
+                configuration=SPIConfig(
+                    instance=instance,
+                    function=None,
+                    port=p,
+                    pin=pn,
+                ),
+                clock_enable=tokens.clock_enable,
+            )
+        )
+
+    return intents
 def _build_i2c_intent(tokens: LexerTokens) -> ParsedIntent:
     instance = tokens.i2c_instances[0]
     func = tokens.i2c_function
@@ -288,8 +295,7 @@ def _build_i2c_intent(tokens: LexerTokens) -> ParsedIntent:
 
     for p, pn in tokens.pins:
         if (p, pn) in valid_pins:
-            port = p
-            pin = pn
+            port, pin = p, pn
             break
 
     if port is None and tokens.pins:
@@ -364,8 +370,7 @@ def _build_exti_intent(tokens: LexerTokens) -> ParsedIntent:
 
     for p, pn in tokens.pins:
         if pn == line:
-            port = p
-            pin = pn
+            port, pin = p, pn
             break
 
     if port is None and tokens.pins:

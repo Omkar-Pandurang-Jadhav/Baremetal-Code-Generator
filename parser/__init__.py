@@ -11,7 +11,7 @@ Usage
 >>> result.model_dump()
 {'mcu': 'stm32f103vb', 'peripheral': 'gpio', ...}
 """
-
+from .normalizer import normalize_prompt
 from .lexer import LexerTokens, tokenize
 from .parser import parse, parse_multi
 from .schema import (
